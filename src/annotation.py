@@ -26,7 +26,7 @@ def get_cosmic_notation(row, fasta_dict):
 
 def normalize_mutation(mutation):
     complement = {'A': 'T', 'T': 'A', 'C': 'G', 'G': 'C'}
-    match = re.match(r"([ATGC])\\[([ATGC]>[ATGC])\\]([ATGC])", mutation)
+    match = re.match(r"([ATGC])\[([ATGC]>[ATGC])\]([ATGC])", mutation)
     if match:
         ref, change, alt = match.groups()
         ref_from, ref_to = change.split('>')
