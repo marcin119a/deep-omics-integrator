@@ -1,0 +1,54 @@
+# Python
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+*.log
+
+# Virtual environments
+venv/
+env/
+.venv/
+.env/
+
+# PyCharm
+.idea/
+*.iml
+
+# Jupyter Notebook
+.ipynb_checkpoints/
+
+# macOS
+.DS_Store
+
+# System files
+Thumbs.db
+desktop.ini
+
+# Test coverage reports
+.coverage
+*.cover
+*.coverage.*
+.cache
+nosetests.xml
+coverage.xml
+*.lcov
+
+# Data files
+*.csv
+*.tsv
+*.parquet
+*.arrow
+
+# TensorFlow checkpoints
+checkpoint
+*.ckpt
+
+# Other
+config.json
+data
