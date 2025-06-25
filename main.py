@@ -3,6 +3,7 @@ import numpy as np
 from Bio import SeqIO
 import pyranges as pr
 import argparse
+from src.config import set_seed
 
 from src import preprocess, annotation, tokenizer_utils, model, training, evaluation, config
 
@@ -92,6 +93,7 @@ def main(experiment_name="Full Model", folds=5):
         inputs.append(X_signatures)
     if use_rna:
         inputs.append(X_rna)
+
 
     histories, scores = training.train_model_kfold(model_fn, inputs, y, class_weights, folds=folds)
     print(f"{experiment_name} – Mean Accuracy: {np.mean(scores):.4f}")

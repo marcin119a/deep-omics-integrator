@@ -1,3 +1,7 @@
+import random
+import numpy as np
+import tensorflow as tf
+
 signature_cols = ['SBS1', 'SBS2', 'SBS3', 'SBS4', 'SBS5',
     'SBS6', 'SBS7a', 'SBS7b', 'SBS7c', 'SBS7d', 'SBS8', 'SBS9', 'SBS10a',
     'SBS10b', 'SBS10c', 'SBS10d', 'SBS11', 'SBS12', 'SBS13', 'SBS14',
@@ -45,3 +49,9 @@ data_paths = {
     'signatures': 'data/Assignment_Solution_Activities.txt',
     'reference_fasta': 'data/hg38.fa'
 }
+
+
+def set_seed(seed=42):
+    random.seed(seed)
+    np.random.seed(seed)
+    tf.random.set_seed(seed)
