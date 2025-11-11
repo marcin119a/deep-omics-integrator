@@ -341,6 +341,11 @@ def evaluate_pam50_model(model_path, pam50_path="data/pam50.csv", use_cached=Tru
             subtype_breast_acc = breast_mask[subtype_mask].sum() / subtype_mask.sum()
             print(f"{subtype:8s}: {breast_mask[subtype_mask].sum():3d}/{subtype_mask.sum():3d} = {subtype_breast_acc:.4f}")
     
+    # Initialize variables for return
+    emb_2d = None
+    has_umap = False
+    target_layer = None
+    
     # t-SNE visualization with PAM50 labels
     if visualize_tsne_flag:
         print("\nGenerating t-SNE visualization with PAM50 labels...")
@@ -373,10 +378,45 @@ def evaluate_pam50_model(model_path, pam50_path="data/pam50.csv", use_cached=Tru
                                 outputs=loaded_model.get_layer(target_layer).output)
                 emb = emb_model.predict(inputs, verbose=1)
                 
-                print("Computing t-SNE projection...")
+                print("Computing t-SNE projections with different perplexity values...")
                 from sklearn.manifold import TSNE
-                tsne = TSNE(n_components=2, random_state=42, verbose=1)
-                emb_2d = tsne.fit_transform(emb)
+                
+                # Try multiple perplexity values
+                # Lower perplexity = more local structure, Higher = more global structure
+                perplexity_values = [30, 50, 100]
+                tsne_results = {}
+                
+                for perp in perplexity_values:
+                    print(f"  Computing t-SNE with perplexity={perp}...")
+                    tsne = TSNE(n_components=2, 
+                               perplexity=perp,
+                               learning_rate=200,
+                               max_iter=2000,  # Changed from n_iter to max_iter
+                               random_state=42, 
+                               verbose=0)
+                    tsne_results[perp] = tsne.fit_transform(emb)
+                
+                # Use perplexity=50 as default for main visualization
+                emb_2d = tsne_results[50]
+                
+                # Also try UMAP for comparison
+                has_umap = False
+                emb_2d_umap = None
+                try:
+                    print("Computing UMAP projection for comparison...")
+                    import umap
+                    umap_reducer = umap.UMAP(n_components=2, 
+                                            n_neighbors=30,
+                                            min_dist=0.1,
+                                            metric='euclidean',
+                                            random_state=42,
+                                            verbose=True)
+                    emb_2d_umap = umap_reducer.fit_transform(emb)
+                    has_umap = True
+                except ImportError:
+                    print("UMAP not available, skipping. Install with: pip install umap-learn")
+                except Exception as e:
+                    print(f"UMAP error: {e}")
                 
                 # Create color map for PAM50 subtypes
                 pam50_colors = {
@@ -406,10 +446,66 @@ def evaluate_pam50_model(model_path, pam50_path="data/pam50.csv", use_cached=Tru
                 plt.grid(alpha=0.3)
                 plt.tight_layout()
                 
-                tsne_path = os.path.join(output_dir, f"tsne_pam50_{timestamp}.png")
+                tsne_path = os.path.join(output_dir, f"tsne_pam50_perp50_{timestamp}.png")
                 plt.savefig(tsne_path, dpi=300, bbox_inches='tight')
                 plt.close()
-                print(f"✓ t-SNE visualization saved to: {tsne_path}")
+                print(f"✓ t-SNE visualization (perplexity=50) saved to: {tsne_path}")
+                
+                # Generate comparison plot with all perplexity values
+                fig, axes = plt.subplots(1, 3, figsize=(24, 7))
+                
+                for idx, perp in enumerate(perplexity_values):
+                    ax = axes[idx]
+                    emb_perp = tsne_results[perp]
+                    
+                    for i, subtype in enumerate(pam50_categories):
+                        mask = y_pam50_labels == subtype
+                        if mask.sum() > 0:
+                            ax.scatter(emb_perp[mask, 0], emb_perp[mask, 1], 
+                                      c=pam50_colors.get(subtype, '#000000'),
+                                      label=f'{subtype} (n={mask.sum()})',
+                                      alpha=0.6, s=30, edgecolors='black', linewidth=0.3)
+                    
+                    ax.set_title(f't-SNE (perplexity={perp})', fontsize=14)
+                    ax.set_xlabel('Component 1', fontsize=10)
+                    ax.set_ylabel('Component 2', fontsize=10)
+                    ax.grid(alpha=0.3)
+                    if idx == 2:  # Only show legend on last plot
+                        ax.legend(loc='best', fontsize=8, framealpha=0.9)
+                
+                fig.suptitle(f'PAM50 Subtypes - t-SNE Comparison\n{target_layer} Layer Embeddings', 
+                           fontsize=16, y=1.02)
+                plt.tight_layout()
+                
+                tsne_comparison_path = os.path.join(output_dir, f"tsne_comparison_{timestamp}.png")
+                plt.savefig(tsne_comparison_path, dpi=300, bbox_inches='tight')
+                plt.close()
+                print(f"✓ t-SNE comparison plot saved to: {tsne_comparison_path}")
+                
+                # Generate UMAP visualization if available
+                if has_umap:
+                    plt.figure(figsize=(14, 12))
+                    
+                    for i, subtype in enumerate(pam50_categories):
+                        mask = y_pam50_labels == subtype
+                        if mask.sum() > 0:
+                            plt.scatter(emb_2d_umap[mask, 0], emb_2d_umap[mask, 1], 
+                                      c=pam50_colors.get(subtype, '#000000'),
+                                      label=f'{subtype} (n={mask.sum()})',
+                                      alpha=0.6, s=50, edgecolors='black', linewidth=0.5)
+                    
+                    plt.title(f'UMAP Visualization - PAM50 Breast Cancer Subtypes\n{target_layer} Layer Embeddings', 
+                             fontsize=16, pad=20)
+                    plt.xlabel('UMAP Component 1', fontsize=12)
+                    plt.ylabel('UMAP Component 2', fontsize=12)
+                    plt.legend(loc='best', fontsize=10, framealpha=0.9)
+                    plt.grid(alpha=0.3)
+                    plt.tight_layout()
+                    
+                    umap_path = os.path.join(output_dir, f"umap_pam50_{timestamp}.png")
+                    plt.savefig(umap_path, dpi=300, bbox_inches='tight')
+                    plt.close()
+                    print(f"✓ UMAP visualization saved to: {umap_path}")
                 
                 # Also create a version showing misclassifications
                 plt.figure(figsize=(14, 12))
@@ -454,6 +550,11 @@ def evaluate_pam50_model(model_path, pam50_path="data/pam50.csv", use_cached=Tru
     print(f"  - Detailed predictions: {os.path.basename(results_path)}")
     if visualize_tsne_flag:
         print(f"  - t-SNE PAM50 visualization: tsne_pam50_{timestamp}.png")
+        try:
+            if has_umap:
+                print(f"  - UMAP PAM50 visualization: umap_pam50_{timestamp}.png")
+        except:
+            pass
         print(f"  - t-SNE classification visualization: tsne_classification_{timestamp}.png")
     
     return {
