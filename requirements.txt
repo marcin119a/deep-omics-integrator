@@ -8,3 +8,4 @@ pyranges
 seaborn
 pyarrow
 fastparquet
+kagglehub
