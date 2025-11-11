@@ -55,3 +55,4 @@ data
 logs
 processed_data
 saved_models
+evaluation_results

@@ -1,16 +1,39 @@
 import tensorflow as tf
 from tensorflow.keras.layers import Dense, Input, Layer
 from tensorflow.keras.models import Model
+import keras
 
 
+@keras.saving.register_keras_serializable(package="custom", name="TrainableAlphaLayer")
 class TrainableAlphaLayer(Layer):
     def __init__(self, num_embeddings, **kwargs):
         super().__init__(**kwargs)
-        self.alpha_vars = self.add_weight(shape=(num_embeddings,), initializer='ones', trainable=True)
+        self.num_embeddings = num_embeddings
+        self.alpha_vars = None
+    
+    def build(self, input_shape):
+        self.alpha_vars = self.add_weight(
+            shape=(self.num_embeddings,), 
+            initializer='ones', 
+            trainable=True,
+            name='alpha_weights'
+        )
+        super().build(input_shape)
 
     def call(self, embeddings):
         weights = tf.nn.softmax(self.alpha_vars)
         return tf.reduce_sum([weights[i] * embeddings[i] for i in range(len(embeddings))], axis=0)
+    
+    def get_config(self):
+        config = super().get_config()
+        config.update({
+            'num_embeddings': self.num_embeddings
+        })
+        return config
+    
+    @classmethod
+    def from_config(cls, config):
+        return cls(**config)
 
 
 def create_model(vocab_bin, vocab_gene, num_classes, gene_dim, sig_dim, rna_dim,
@@ -32,7 +55,7 @@ def create_model(vocab_bin, vocab_gene, num_classes, gene_dim, sig_dim, rna_dim,
         x = Input(shape=(rna_dim,), name='RNA')
         inputs.append(x)
         transformed.append(Dense(128, activation='relu')(x))
-    combined = TrainableAlphaLayer(len(transformed))(transformed)
+    combined = TrainableAlphaLayer(len(transformed), name='alpha_combination')(transformed)
     x = Dense(256, activation='relu')(combined)
     out = Dense(num_classes, activation='softmax', name='output')(x)
     model = Model(inputs=inputs, outputs=[out])

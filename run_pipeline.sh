@@ -87,7 +87,7 @@ run_kfold_experiments() {
     for experiment in "Full Model" "No RNA" "No Signature" "No Gene" "No Genomic Bin"; do
         log_info "Running experiment: $experiment"
         
-        if python3 main.py --experiment "$experiment" --folds "$folds" 2>&1 | tee -a "$LOG_FILE"; then
+        if python main.py --experiment "$experiment" --folds "$folds" 2>&1 | tee -a "$LOG_FILE"; then
             log "✓ Experiment '$experiment' completed successfully"
         else
             log_error "✗ Experiment '$experiment' failed"
@@ -124,7 +124,7 @@ train_full_model() {
     
     log "Training model: $model_name"
     
-    if python3 train_and_save_model.py --name "$model_name" $cache_flag $save_flag 2>&1 | tee -a "$LOG_FILE"; then
+    if python train_and_save_model.py --name "$model_name" $cache_flag $save_flag 2>&1 | tee -a "$LOG_FILE"; then
         log "✓ Model training completed successfully"
         
         # Find the most recent model
@@ -144,7 +144,7 @@ preprocess_only() {
     log "Running preprocessing and saving data..."
     log_info "This will create cached data files for faster subsequent runs"
     
-    python3 -c "
+    python -c "
 from src.config import set_seed
 set_seed(42)
 
@@ -160,12 +160,58 @@ print('Starting data preprocessing...')
     log_warning "Note: For preprocessing only, run train script with --no-cache flag first time"
 }
 
+evaluate_model() {
+    print_header "Evaluating Trained Model"
+    
+    model_path=${1:-""}
+    model_name=${2:-"full_model"}
+    use_cache=${3:-true}
+    skip_tsne=${4:-false}
+    layer_name=${5:-"alpha_combination"}
+    
+    cache_flag=""
+    tsne_flag=""
+    
+    if [ "$use_cache" = false ]; then
+        cache_flag="--no-cache"
+        log_info "Cache disabled - will process data from scratch"
+    else
+        log_info "Cache enabled - will use cached data if available"
+    fi
+    
+    if [ "$skip_tsne" = true ]; then
+        tsne_flag="--no-tsne"
+        log_info "t-SNE visualization disabled"
+    else
+        log_info "t-SNE visualization enabled"
+    fi
+    
+    if [ -n "$model_path" ]; then
+        log "Evaluating model: $model_path"
+        if python evaluate_model.py --model "$model_path" $cache_flag $tsne_flag --layer "$layer_name" 2>&1 | tee -a "$LOG_FILE"; then
+            log "✓ Model evaluation completed successfully"
+        else
+            log_error "✗ Model evaluation failed"
+            return 1
+        fi
+    else
+        log "Searching for latest model matching pattern: $model_name"
+        if python evaluate_model.py --model-name "$model_name" $cache_flag $tsne_flag --layer "$layer_name" 2>&1 | tee -a "$LOG_FILE"; then
+            log "✓ Model evaluation completed successfully"
+        else
+            log_error "✗ Model evaluation failed"
+            return 1
+        fi
+    fi
+}
+
 show_status() {
     print_header "Pipeline Status"
     
     echo "📁 Directory Status:"
     echo "  - Processed data: $(ls -1 $PROCESSED_DATA_DIR/*.npz 2>/dev/null | wc -l) files"
     echo "  - Saved models: $(ls -1 $MODELS_DIR/*.keras 2>/dev/null | wc -l) files"
+    echo "  - Evaluation results: $(ls -1 evaluation_results/*.json 2>/dev/null | wc -l) files"
     echo "  - Log files: $(ls -1 $LOG_DIR/*.log 2>/dev/null | wc -l) files"
     echo ""
     
@@ -180,6 +226,12 @@ show_status() {
         ls -lth "$MODELS_DIR" | head -n 5
         echo ""
     fi
+    
+    if [ -d "evaluation_results" ] && [ "$(ls -A evaluation_results 2>/dev/null)" ]; then
+        echo "📈 Latest evaluation results:"
+        ls -lth "evaluation_results" | head -n 5
+        echo ""
+    fi
 }
 
 ###############################################################################
@@ -191,9 +243,10 @@ show_usage() {
 Usage: $0 [COMMAND] [OPTIONS]
 
 Commands:
-    full              Run complete pipeline (experiments + train full model)
+    full              Run complete pipeline (experiments + train + evaluate)
     experiments       Run k-fold cross-validation experiments only
     train            Train and save full model
+    evaluate         Evaluate a trained model
     preprocess       Preprocess data and save cache (no training)
     status           Show pipeline status
     help             Show this help message
@@ -201,14 +254,20 @@ Commands:
 Options:
     --folds N        Number of folds for cross-validation (default: 5)
     --model-name     Name for saved model (default: full_model)
+    --model PATH     Path to specific model file for evaluation
     --no-cache       Don't use cached preprocessed data
     --no-save        Don't save preprocessed data
+    --no-tsne        Skip t-SNE visualization in evaluation
+    --layer NAME     Layer name for t-SNE extraction (default: alpha_combination)
 
 Examples:
     $0 full                                    # Run complete pipeline
     $0 experiments --folds 10                  # Run experiments with 10 folds
     $0 train --model-name my_model             # Train specific model
     $0 train --no-cache                        # Train without using cache
+    $0 evaluate                                # Evaluate latest model
+    $0 evaluate --model path/to/model.keras    # Evaluate specific model
+    $0 evaluate --no-tsne                      # Evaluate without t-SNE
     $0 preprocess                              # Only preprocess and cache data
     $0 status                                  # Show current status
 
@@ -233,8 +292,11 @@ main() {
     # Parse options
     FOLDS=5
     MODEL_NAME="full_model"
+    MODEL_PATH=""
     USE_CACHE=true
     SAVE_DATA=true
+    SKIP_TSNE=false
+    LAYER_NAME="alpha_combination"
     
     while [ $# -gt 0 ]; do
         case $1 in
@@ -246,6 +308,10 @@ main() {
                 MODEL_NAME="$2"
                 shift 2
                 ;;
+            --model)
+                MODEL_PATH="$2"
+                shift 2
+                ;;
             --no-cache)
                 USE_CACHE=false
                 shift
@@ -253,6 +319,14 @@ main() {
             --no-save)
                 SAVE_DATA=false
                 shift
+                ;;
+            --no-tsne)
+                SKIP_TSNE=true
+                shift
+                ;;
+            --layer)
+                LAYER_NAME="$2"
+                shift 2
                 ;;
             *)
                 log_error "Unknown option: $1"
@@ -268,6 +342,7 @@ main() {
             log_info "Running FULL pipeline"
             run_kfold_experiments "$FOLDS"
             train_full_model "$MODEL_NAME" "$USE_CACHE" "$SAVE_DATA"
+            evaluate_model "$MODEL_PATH" "$MODEL_NAME" "$USE_CACHE" "$SKIP_TSNE" "$LAYER_NAME"
             show_status
             ;;
         experiments|exp)
@@ -275,6 +350,9 @@ main() {
             ;;
         train)
             train_full_model "$MODEL_NAME" "$USE_CACHE" "$SAVE_DATA"
+            ;;
+        evaluate|eval)
+            evaluate_model "$MODEL_PATH" "$MODEL_NAME" "$USE_CACHE" "$SKIP_TSNE" "$LAYER_NAME"
             ;;
         preprocess|prep)
             preprocess_only
