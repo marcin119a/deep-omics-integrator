@@ -52,3 +52,6 @@ checkpoint
 # Other
 config.json
 data
+logs
+processed_data
+saved_models

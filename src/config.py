@@ -51,7 +51,7 @@ class_short_labels = {
 
 def download_kaggle_data():
     """Pobiera dane z Kaggle używając kagglehub"""
-    print("Pobieranie danych z Kaggle...")
+    print("Downloading data from Kaggle...")
     dataset_path = kagglehub.dataset_download("martininf1n1ty/oncokb-cancer-gene-list")
     print(f"Dane pobrane do: {dataset_path}")
     return dataset_path
@@ -72,17 +72,17 @@ def download_hg38_reference():
     
     # Pobierz spakowany plik
     if not os.path.exists(fasta_gz_path):
-        print("Pobieranie hg38.fa.gz z UCSC (to może chwilę potrwać - plik jest duży)...")
+        print("Downloading hg38.fa.gz from UCSC (this may take a while - the file is large)...")
         url = "http://hgdownload.soe.ucsc.edu/goldenPath/hg38/bigZips/hg38.fa.gz"
         urllib.request.urlretrieve(url, fasta_gz_path)
         print(f"Pobrano do {fasta_gz_path}")
     
     # Rozpakuj plik
-    print("Rozpakowywanie hg38.fa.gz...")
+    print("Unpacking hg38.fa.gz...")
     with gzip.open(fasta_gz_path, 'rb') as f_in:
         with open(fasta_path, 'wb') as f_out:
             shutil.copyfileobj(f_in, f_out)
-    print(f"Rozpakowano do {fasta_path}")
+    print(f"Unpacked to {fasta_path}")
     
     # Opcjonalnie usuń spakowany plik
     # os.remove(fasta_gz_path)
