@@ -56,3 +56,5 @@ logs
 processed_data
 saved_models
 evaluation_results
+processed_data_no_pam50
+evaluation_results_pam50
