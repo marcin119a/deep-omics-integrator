@@ -10,9 +10,12 @@ import pyranges as pr
 import argparse
 import os
 import json
+import pickle
+import glob
 from datetime import datetime
 from sklearn.metrics import classification_report, confusion_matrix, accuracy_score
 import matplotlib.pyplot as plt
+import matplotlib.cm as cm
 import seaborn as sns
 from src.config import set_seed
 
@@ -42,6 +45,46 @@ def find_latest_model(model_dir="saved_models", model_pattern="full_model"):
     # Sort by modification time
     model_files.sort(key=lambda x: os.path.getmtime(os.path.join(model_dir, x)), reverse=True)
     return os.path.join(model_dir, model_files[0])
+
+
+def find_latest_test_dataset(test_data_dir="processed_data_no_pam50"):
+    """Find the most recent test dataset file."""
+    if not os.path.exists(test_data_dir):
+        return None, None
+    
+    test_files = [f for f in os.listdir(test_data_dir) 
+                  if f.startswith("test_dataset_") and f.endswith(".npz")]
+    if not test_files:
+        return None, None
+    
+    # Sort by timestamp in filename
+    test_files.sort(reverse=True)
+    latest_file = test_files[0]
+    timestamp = latest_file.replace("test_dataset_", "").replace(".npz", "")
+    
+    test_data_path = os.path.join(test_data_dir, f"test_dataset_{timestamp}.npz")
+    test_metadata_path = os.path.join(test_data_dir, f"test_metadata_{timestamp}.pkl")
+    
+    if os.path.exists(test_data_path):
+        return test_data_path, test_metadata_path if os.path.exists(test_metadata_path) else None
+    
+    return None, None
+
+
+def load_test_dataset(test_data_path):
+    """Load test dataset from npz file."""
+    print(f"Loading test dataset from: {test_data_path}")
+    data = np.load(test_data_path, allow_pickle=True)
+    
+    X_bin = data['X_bin']
+    X_gene = data['X_gene']
+    X_signatures = data['X_signatures']
+    X_rna = data['X_rna']
+    y = data['y']
+    case_barcodes = data['case_barcodes'] if 'case_barcodes' in data else None
+    
+    print(f"✓ Loaded test dataset: {len(y)} samples")
+    return X_bin, X_gene, X_signatures, X_rna, y, case_barcodes
 
 
 def load_pam50_data(pam50_path="data/pam50.csv"):
@@ -275,6 +318,29 @@ def evaluate_pam50_model(model_path, pam50_path="data/pam50.csv", use_cached=Tru
         filtered_df['primary_site_cat'] = filtered_df['primary_site'].astype('category').cat.codes
         label_map = dict(enumerate(filtered_df.groupby('primary_site_cat')['primary_site'].first().sort_index()))
     
+    # Load test dataset if available
+    print("\nTrying to load test dataset...")
+    test_data_path, test_metadata_path = find_latest_test_dataset()
+    X_test_bin, X_test_gene, X_test_signatures, X_test_rna = None, None, None, None
+    y_test = None
+    case_barcodes_test = None
+    
+    if test_data_path:
+        try:
+            X_test_bin, X_test_gene, X_test_signatures, X_test_rna, y_test, case_barcodes_test = load_test_dataset(test_data_path)
+            
+            # Load test metadata if available
+            if test_metadata_path and os.path.exists(test_metadata_path):
+                with open(test_metadata_path, 'rb') as f:
+                    test_metadata = pickle.load(f)
+                    print(f"  Test dataset timestamp: {test_metadata.get('timestamp', 'unknown')}")
+                    print(f"  Test samples: {test_metadata.get('n_test_samples', 'unknown')}")
+        except Exception as e:
+            print(f"Warning: Could not load test dataset: {e}")
+            print("  Will use all available data as background")
+    else:
+        print("  No test dataset found. Will use all available data as background")
+    
     # Load model
     print(f"\nLoading model from: {model_path}")
     from tensorflow import keras
@@ -374,30 +440,61 @@ def evaluate_pam50_model(model_path, pam50_path="data/pam50.csv", use_cached=Tru
                 # Generate t-SNE visualization
                 from tensorflow.keras.models import Model
                 
-                emb_model = Model(inputs=loaded_model.input, 
-                                outputs=loaded_model.get_layer(target_layer).output)
-                emb = emb_model.predict(inputs, verbose=1)
+                emb_model = Model(
+                    inputs=loaded_model.input,
+                    outputs=loaded_model.get_layer(target_layer).output
+                )
+
+                # Embeddings for PAM50 subset (for t-SNE)
+                emb_pam50 = emb_model.predict(inputs, verbose=1)
                 
-                print("Computing t-SNE projections with different perplexity values...")
+                # Prepare data for visualization: test dataset + PAM50
+                emb_test = None
+                y_test_labels = None
+                test_inputs = None
+                
+                if X_test_bin is not None:
+                    print("\nPreparing test dataset for visualization...")
+                    test_inputs = [X_test_bin, X_test_gene, X_test_signatures, X_test_rna]
+                    emb_test = emb_model.predict(test_inputs, verbose=1)
+                    
+                    # Map test labels to primary site names
+                    y_test_labels = np.array([label_map.get(int(y_val), 'Unknown') for y_val in y_test])
+                    print(f"  Test dataset embeddings: {emb_test.shape}")
+                
+                # Combine embeddings for joint visualization
+                if emb_test is not None:
+                    emb_combined = np.vstack([emb_test, emb_pam50])
+                    print(f"  Combined embeddings: {emb_combined.shape} (test: {len(emb_test)}, PAM50: {len(emb_pam50)})")
+                else:
+                    emb_combined = emb_pam50
+                    print(f"  Using PAM50 embeddings only: {emb_combined.shape}")
+                
+                print("\nComputing t-SNE projections...")
                 from sklearn.manifold import TSNE
                 
-                # Try multiple perplexity values
-                # Lower perplexity = more local structure, Higher = more global structure
-                perplexity_values = [30, 50, 100]
-                tsne_results = {}
+                # Compute t-SNE on combined data
+                print("  Computing t-SNE on combined data...")
+                tsne = TSNE(
+                    n_components=2,
+                    perplexity=min(30, (len(emb_combined)-1)//3),  # Adjust perplexity to data size
+                    learning_rate=300,
+                    early_exaggeration=15,
+                    metric='cosine',
+                    init='pca',
+                    random_state=42,
+                    verbose=1
+                )
+                emb_2d_combined = tsne.fit_transform(emb_combined)
                 
-                for perp in perplexity_values:
-                    print(f"  Computing t-SNE with perplexity={perp}...")
-                    tsne = TSNE(n_components=2, 
-                               perplexity=perp,
-                               learning_rate=200,
-                               max_iter=2000,  # Changed from n_iter to max_iter
-                               random_state=42, 
-                               verbose=0)
-                    tsne_results[perp] = tsne.fit_transform(emb)
-                
-                # Use perplexity=50 as default for main visualization
-                emb_2d = tsne_results[50]
+                # Split back into test and PAM50
+                if emb_test is not None:
+                    n_test = len(emb_test)
+                    emb_2d_test = emb_2d_combined[:n_test]
+                    emb_2d = emb_2d_combined[n_test:]
+                else:
+                    emb_2d = emb_2d_combined
+                    emb_2d_test = None
                 
                 # Also try UMAP for comparison
                 has_umap = False
@@ -405,13 +502,46 @@ def evaluate_pam50_model(model_path, pam50_path="data/pam50.csv", use_cached=Tru
                 try:
                     print("Computing UMAP projection for comparison...")
                     import umap
-                    umap_reducer = umap.UMAP(n_components=2, 
-                                            n_neighbors=30,
-                                            min_dist=0.1,
-                                            metric='euclidean',
-                                            random_state=42,
-                                            verbose=True)
-                    emb_2d_umap = umap_reducer.fit_transform(emb)
+                    umap_reducer = umap.UMAP(
+                        n_components=2,
+                        n_neighbors=10,
+                        min_dist=0.01,
+                        metric='cosine',
+                        random_state=42,
+                        verbose=True
+                    )
+
+                    # Compute embeddings for test dataset + PAM50
+                    print("Computing embeddings for test dataset + PAM50 for UMAP...")
+                    if X_test_bin is not None:
+                        # Combine test and PAM50 for UMAP
+                        inputs_combined = [
+                            np.vstack([X_test_bin, X_bin_pam50]),
+                            np.vstack([X_test_gene, X_gene_pam50]),
+                            np.vstack([X_test_signatures, X_signatures_pam50]),
+                            np.vstack([X_test_rna, X_rna_pam50])
+                        ]
+                        emb_combined_umap = emb_model.predict(inputs_combined, verbose=1)
+                        
+                        # Fit UMAP on combined data
+                        emb_2d_combined_umap = umap_reducer.fit_transform(emb_combined_umap)
+                        
+                        # Split back
+                        n_test_umap = len(X_test_bin)
+                        emb_2d_test_umap = emb_2d_combined_umap[:n_test_umap]
+                        emb_2d_umap = emb_2d_combined_umap[n_test_umap:]
+                        
+                        # Get test labels for UMAP visualization
+                        y_test_labels_umap = y_test_labels if y_test_labels is not None else None
+                    else:
+                        # Use all data as before
+                        inputs_all = [X_bin, X_gene, X_signatures, X_rna]
+                        emb_all = emb_model.predict(inputs_all, verbose=1)
+                        emb_2d_all = umap_reducer.fit_transform(emb_all)
+                        emb_2d_umap = emb_2d_all[pam50_mask]
+                        emb_2d_test_umap = None
+                        y_test_labels_umap = None
+                    
                     has_umap = True
                 except ImportError:
                     print("UMAP not available, skipping. Install with: pip install umap-learn")
@@ -427,7 +557,52 @@ def evaluate_pam50_model(model_path, pam50_path="data/pam50.csv", use_cached=Tru
                     'Normal': '#FF7F00'
                 }
                 
-                # Plot t-SNE with PAM50 labels
+                # Plot t-SNE with test dataset as background and PAM50 on top
+                plt.figure(figsize=(16, 12))
+                
+                # Plot test dataset as background (grouped by primary site)
+                if emb_2d_test is not None and y_test_labels is not None:
+                    unique_test_sites = np.unique(y_test_labels)
+                    # Use lighter colors for test dataset
+                    test_colors_map = cm.get_cmap('tab20')(np.linspace(0, 1, len(unique_test_sites)))
+                    
+                    for site in unique_test_sites:
+                        site_mask = y_test_labels == site
+                        if site_mask.sum() > 0:
+                            plt.scatter(
+                                emb_2d_test[site_mask, 0], 
+                                emb_2d_test[site_mask, 1], 
+                                c=[test_colors_map[np.where(unique_test_sites == site)[0][0]]],
+                                label=f'Test: {site}' if site != 'Breast' else None,  # Skip Breast in legend
+                                alpha=0.2,
+                                s=20,
+                                edgecolors='none',
+                                marker='o'
+                            )
+                
+                # Plot PAM50 subtypes on top with distinct colors
+                for i, subtype in enumerate(pam50_categories):
+                    mask = y_pam50_labels == subtype
+                    if mask.sum() > 0:
+                        plt.scatter(emb_2d[mask, 0], emb_2d[mask, 1], 
+                                  c=pam50_colors.get(subtype, '#000000'),
+                                  label=f'PAM50: {subtype} (n={mask.sum()})',
+                                  alpha=0.8, s=80, edgecolors='black', linewidth=1.5, marker='^')
+                
+                plt.title(f't-SNE: PAM50 Breast Subtypes (colored triangles) vs Test Dataset (gray background)\n{target_layer} Layer Embeddings', 
+                         fontsize=16, pad=20)
+                plt.xlabel('t-SNE Component 1', fontsize=12)
+                plt.ylabel('t-SNE Component 2', fontsize=12)
+                plt.legend(loc='best', fontsize=9, framealpha=0.9, ncol=2)
+                plt.grid(alpha=0.3)
+                plt.tight_layout()
+                
+                tsne_path = os.path.join(output_dir, f"tsne_pam50_with_test_background_{timestamp}.png")
+                plt.savefig(tsne_path, dpi=300, bbox_inches='tight')
+                plt.close()
+                print(f"✓ t-SNE visualization with test background saved to: {tsne_path}")
+                
+                # Also create a version showing only PAM50 (original plot)
                 plt.figure(figsize=(14, 12))
                 
                 for i, subtype in enumerate(pam50_categories):
@@ -446,63 +621,131 @@ def evaluate_pam50_model(model_path, pam50_path="data/pam50.csv", use_cached=Tru
                 plt.grid(alpha=0.3)
                 plt.tight_layout()
                 
-                tsne_path = os.path.join(output_dir, f"tsne_pam50_perp50_{timestamp}.png")
-                plt.savefig(tsne_path, dpi=300, bbox_inches='tight')
+                tsne_pam50_only_path = os.path.join(output_dir, f"tsne_pam50_only_{timestamp}.png")
+                plt.savefig(tsne_pam50_only_path, dpi=300, bbox_inches='tight')
                 plt.close()
-                print(f"✓ t-SNE visualization (perplexity=50) saved to: {tsne_path}")
+                print(f"✓ t-SNE visualization (PAM50 only) saved to: {tsne_pam50_only_path}")
                 
-                # Generate comparison plot with all perplexity values
-                fig, axes = plt.subplots(1, 3, figsize=(24, 7))
+                # Generate comparison plot showing test dataset grouped by primary site vs PAM50
+                fig, axes = plt.subplots(1, 2, figsize=(20, 8))
                 
-                for idx, perp in enumerate(perplexity_values):
-                    ax = axes[idx]
-                    emb_perp = tsne_results[perp]
+                # Left plot: Test dataset grouped by primary site (excluding Breast)
+                ax = axes[0]
+                if emb_2d_test is not None and y_test_labels is not None:
+                    unique_test_sites = np.unique(y_test_labels)
+                    test_colors_map = cm.get_cmap('tab20')(np.linspace(0, 1, len(unique_test_sites)))
                     
-                    for i, subtype in enumerate(pam50_categories):
-                        mask = y_pam50_labels == subtype
-                        if mask.sum() > 0:
-                            ax.scatter(emb_perp[mask, 0], emb_perp[mask, 1], 
-                                      c=pam50_colors.get(subtype, '#000000'),
-                                      label=f'{subtype} (n={mask.sum()})',
-                                      alpha=0.6, s=30, edgecolors='black', linewidth=0.3)
-                    
-                    ax.set_title(f't-SNE (perplexity={perp})', fontsize=14)
-                    ax.set_xlabel('Component 1', fontsize=10)
-                    ax.set_ylabel('Component 2', fontsize=10)
-                    ax.grid(alpha=0.3)
-                    if idx == 2:  # Only show legend on last plot
-                        ax.legend(loc='best', fontsize=8, framealpha=0.9)
+                    for site in unique_test_sites:
+                        if site == 'Breast':
+                            continue  # Skip Breast as we'll show PAM50 separately
+                        site_mask = y_test_labels == site
+                        if site_mask.sum() > 0:
+                            ax.scatter(
+                                emb_2d_test[site_mask, 0], 
+                                emb_2d_test[site_mask, 1], 
+                                c=[test_colors_map[np.where(unique_test_sites == site)[0][0]]],
+                                label=f'{site} (n={site_mask.sum()})',
+                                alpha=0.5,
+                                s=30,
+                                edgecolors='none'
+                            )
                 
-                fig.suptitle(f'PAM50 Subtypes - t-SNE Comparison\n{target_layer} Layer Embeddings', 
+                ax.set_title('Test Dataset (Non-Breast Primary Sites)', fontsize=14)
+                ax.set_xlabel('t-SNE Component 1', fontsize=10)
+                ax.set_ylabel('t-SNE Component 2', fontsize=10)
+                ax.grid(alpha=0.3)
+                ax.legend(loc='best', fontsize=7, framealpha=0.9, ncol=2)
+                
+                # Right plot: PAM50 subtypes
+                ax = axes[1]
+                for i, subtype in enumerate(pam50_categories):
+                    mask = y_pam50_labels == subtype
+                    if mask.sum() > 0:
+                        ax.scatter(emb_2d[mask, 0], emb_2d[mask, 1], 
+                                  c=pam50_colors.get(subtype, '#000000'),
+                                  label=f'{subtype} (n={mask.sum()})',
+                                  alpha=0.8, s=60, edgecolors='black', linewidth=1)
+                
+                ax.set_title('PAM50 Breast Cancer Subtypes', fontsize=14)
+                ax.set_xlabel('t-SNE Component 1', fontsize=10)
+                ax.set_ylabel('t-SNE Component 2', fontsize=10)
+                ax.grid(alpha=0.3)
+                ax.legend(loc='best', fontsize=8, framealpha=0.9)
+                
+                fig.suptitle(f'Comparison: Test Dataset vs PAM50 Subtypes\n{target_layer} Layer Embeddings', 
                            fontsize=16, y=1.02)
                 plt.tight_layout()
                 
-                tsne_comparison_path = os.path.join(output_dir, f"tsne_comparison_{timestamp}.png")
+                tsne_comparison_path = os.path.join(output_dir, f"tsne_comparison_test_vs_pam50_{timestamp}.png")
                 plt.savefig(tsne_comparison_path, dpi=300, bbox_inches='tight')
                 plt.close()
                 print(f"✓ t-SNE comparison plot saved to: {tsne_comparison_path}")
                 
                 # Generate UMAP visualization if available
                 if has_umap:
-                    plt.figure(figsize=(14, 12))
-                    
+                    plt.figure(figsize=(16, 12))
+
+                    # Plot test dataset as background
+                    if emb_2d_test_umap is not None and y_test_labels_umap is not None:
+                        unique_test_sites = np.unique(y_test_labels_umap)
+                        test_colors_map = cm.get_cmap('tab20')(np.linspace(0, 1, len(unique_test_sites)))
+                        
+                        for site in unique_test_sites:
+                            if site == 'Breast':
+                                continue  # Skip Breast as we'll show PAM50 separately
+                            site_mask = y_test_labels_umap == site
+                            if site_mask.sum() > 0:
+                                plt.scatter(
+                                    emb_2d_test_umap[site_mask, 0],
+                                    emb_2d_test_umap[site_mask, 1],
+                                    c=[test_colors_map[np.where(unique_test_sites == site)[0][0]]],
+                                    label=f'Test: {site}',
+                                    alpha=0.2,
+                                    s=20,
+                                    edgecolors='none'
+                                )
+                    elif emb_2d_test_umap is None:
+                        # Fallback: use gray background if test data not available
+                        non_pam_mask = ~pam50_mask
+                        if non_pam_mask.sum() > 0:
+                            plt.scatter(
+                                emb_2d_all[non_pam_mask, 0],
+                                emb_2d_all[non_pam_mask, 1],
+                                c='#D3D3D3',
+                                label=f'Other primary sites (n={non_pam_mask.sum()})',
+                                alpha=0.3,
+                                s=20
+                            )
+
+                    # Plot PAM50 subtypes on top
                     for i, subtype in enumerate(pam50_categories):
                         mask = y_pam50_labels == subtype
                         if mask.sum() > 0:
-                            plt.scatter(emb_2d_umap[mask, 0], emb_2d_umap[mask, 1], 
-                                      c=pam50_colors.get(subtype, '#000000'),
-                                      label=f'{subtype} (n={mask.sum()})',
-                                      alpha=0.6, s=50, edgecolors='black', linewidth=0.5)
-                    
-                    plt.title(f'UMAP Visualization - PAM50 Breast Cancer Subtypes\n{target_layer} Layer Embeddings', 
-                             fontsize=16, pad=20)
+                            plt.scatter(
+                                emb_2d_umap[mask, 0],
+                                emb_2d_umap[mask, 1],
+                                c=pam50_colors.get(subtype, '#000000'),
+                                label=f'PAM50: {subtype} (n={mask.sum()})',
+                                alpha=0.8,
+                                s=80,
+                                edgecolors='black',
+                                linewidth=1.5,
+                                marker='^'
+                            )
+
+                    plt.title(
+                        'UMAP: PAM50 Breast Subtypes (colored triangles) vs Test Dataset (gray background)\n'
+                        f'{target_layer} Layer Embeddings',
+                        fontsize=16,
+                        pad=20
+                    )
                     plt.xlabel('UMAP Component 1', fontsize=12)
                     plt.ylabel('UMAP Component 2', fontsize=12)
-                    plt.legend(loc='best', fontsize=10, framealpha=0.9)
+                    plt.legend(loc='best', fontsize=9, framealpha=0.9, ncol=2)
                     plt.grid(alpha=0.3)
                     plt.tight_layout()
-                    
-                    umap_path = os.path.join(output_dir, f"umap_pam50_{timestamp}.png")
+
+                    umap_path = os.path.join(output_dir, f"umap_pam50_with_test_background_{timestamp}.png")
                     plt.savefig(umap_path, dpi=300, bbox_inches='tight')
                     plt.close()
                     print(f"✓ UMAP visualization saved to: {umap_path}")

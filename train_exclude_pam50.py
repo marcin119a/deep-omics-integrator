@@ -8,7 +8,9 @@ from Bio import SeqIO
 import pyranges as pr
 import argparse
 import os
+import pickle
 from datetime import datetime
+from sklearn.model_selection import train_test_split
 from src.config import set_seed
 
 from src import preprocess, annotation, tokenizer_utils, model, training, config, data_cache
@@ -141,7 +143,6 @@ def train_and_save_model_no_pam50(model_name="model_no_pam50", pam50_path="data/
         )
         
         # Save tokenizers and metadata
-        import pickle
         with open(tokenizer_path, 'wb') as f:
             pickle.dump({'tokenizer_bin': tokenizer_bin, 'tokenizer_gene': tokenizer_gene}, f)
         
@@ -171,20 +172,67 @@ def train_and_save_model_no_pam50(model_name="model_no_pam50", pam50_path="data/
         use_rna=True
     )
     
-    # Prepare inputs
-    inputs = [X_bin, X_gene, X_signatures, X_rna]
+    # Create train/test split
+    print("\nCreating train/test split...")
+    X_all = [X_bin, X_gene, X_signatures, X_rna]
+    case_barcodes_all = grouped_df['case_barcode'].values
+    
+    # Split data into train and test sets (80/20)
+    train_idx, test_idx = train_test_split(
+        np.arange(len(y)), 
+        test_size=0.2, 
+        random_state=42, 
+        stratify=y
+    )
+    
+    X_train = [X[train_idx] for X in X_all]
+    X_test = [X[test_idx] for X in X_all]
+    y_train = y[train_idx]
+    y_test = y[test_idx]
+    case_barcodes_train = case_barcodes_all[train_idx]
+    case_barcodes_test = case_barcodes_all[test_idx]
+    
+    print(f"  Training samples: {len(y_train)}")
+    print(f"  Test samples: {len(y_test)}")
+    
+    # Save test dataset for evaluation
+    if save_processed:
+        timestamp = datetime.now().strftime("%Y%m%d_%H%M%S")
+        save_dir = "processed_data_no_pam50"
+        os.makedirs(save_dir, exist_ok=True)
+        
+        test_data_path = os.path.join(save_dir, f"test_dataset_{timestamp}.npz")
+        np.savez_compressed(
+            test_data_path,
+            X_bin=X_test[0],
+            X_gene=X_test[1],
+            X_signatures=X_test[2],
+            X_rna=X_test[3],
+            y=y_test,
+            case_barcodes=case_barcodes_test
+        )
+        print(f"✓ Saved test dataset to {test_data_path}")
+    
+    # Prepare inputs for training
+    inputs = X_train
     
     # Train model
     print("\nTraining model (excluding PAM50 patients)...")
     print("="*80)
     history = full_model.fit(
-        inputs, y, 
+        inputs, y_train, 
         epochs=20, 
         batch_size=128, 
         validation_split=0.2,
         class_weight=class_weights, 
         verbose=1
     )
+    
+    # Evaluate on test set
+    print("\nEvaluating on test set...")
+    test_inputs = X_test
+    test_loss, test_acc = full_model.evaluate(test_inputs, y_test, verbose=1)
+    print(f"Test Accuracy: {test_acc:.4f}")
     
     # Create models directory if it doesn't exist
     models_dir = "saved_models"
@@ -204,8 +252,22 @@ def train_and_save_model_no_pam50(model_name="model_no_pam50", pam50_path="data/
     print(f"\nTraining Summary:")
     print(f"  Final Training Accuracy: {final_train_acc:.4f}")
     print(f"  Final Validation Accuracy: {final_val_acc:.4f}")
+    print(f"  Test Accuracy: {test_acc:.4f}")
     print(f"  PAM50 patients excluded: {len(pam50_barcodes)}")
-    print(f"  Training samples: {len(y)}")
+    print(f"  Training samples: {len(y_train)}")
+    print(f"  Test samples: {len(y_test)}")
+    
+    # Save test dataset metadata
+    if save_processed:
+        test_metadata_path = os.path.join(save_dir, f"test_metadata_{timestamp}.pkl")
+        with open(test_metadata_path, 'wb') as f:
+            pickle.dump({
+                'test_case_barcodes': case_barcodes_test.tolist(),
+                'test_data_path': test_data_path,
+                'n_test_samples': len(y_test),
+                'timestamp': timestamp
+            }, f)
+        print(f"✓ Saved test metadata to {test_metadata_path}")
     
     return model_path, history
 
